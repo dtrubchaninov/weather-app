@@ -5,28 +5,29 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from utils import get_wind_direction_ru, format_temp
 from api import fetch_weather_data
+from network import get_local_ip, WeatherServer
 
 from constants import (
-    WMO_CODES,
-    C_BG,
-    C_SURFACE,
-    C_CARD,
-    C_BORDER,
-    C_TEXT,
-    C_MUTED,
-    C_ACCENT,
-    C_ACCENT_HOVER,
-    C_SUCCESS,
-    CITIES,
-    DAYS_RU,
-)
+        WMO_CODES,
+        C_BG,
+        C_SURFACE,
+        C_CARD,
+        C_BORDER,
+        C_TEXT,
+        C_MUTED,
+        C_ACCENT,
+        C_ACCENT_HOVER,
+        C_SUCCESS,
+        CITIES,
+        DAYS_RU,
+    )
 
 class DesktopWeatherApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, enable_network=True, port=8888):
         self.root = root
-        self.root.title("Погода • Настольное приложение Python")
-        self.root.geometry("820x680")
-        self.root.minsize(740, 600)
+        self.root.title("Погода")
+        self.root.geometry("820x730")
+        self.root.minsize(740, 640)
 
         self.c_bg = C_BG
         self.c_surface = C_SURFACE
@@ -43,13 +44,127 @@ class DesktopWeatherApp:
         self.current_city = "Москва"
         self.temp_unit = "C"
         self.cached_weather = None
+        self.enable_network = enable_network
+        self.server_port = port
+        self.server = None
+        self.local_ip = get_local_ip()
 
         self._build_ui()
         self.load_weather_async("Москва")
 
+        if self.enable_network and WeatherServer:
+            self._start_network_server()
+
+    def _start_network_server(self):
+        try:
+            self.server = WeatherServer(
+                host="0.0.0.0",
+                port=self.server_port,
+                command_handler=self.handle_network_command,
+            )
+            self.server.start()
+            self.lbl_net_info.config(
+                text=f"🌐 TCP Сервер активен: IP для пульта {self.local_ip}:{self.server_port} | Порт открыт",
+                fg="#38bdf8",
+            )
+        except Exception as err:
+            self.lbl_net_info.config(
+                text=f"⚠️ Ошибка запуска TCP сервера: {err}",
+                fg="#ef4444",
+            )
+
+    def handle_network_command(self, req: dict, client_addr: tuple):
+        cmd = req.get("cmd", "")
+        ip_str = client_addr[0]
+
+        if cmd == "set_city":
+            city = req.get("city", "").strip()
+            if city:
+                self.root.after(0, self._apply_remote_city, city, ip_str)
+                return {
+                    "status": "ok",
+                    "message": f"Команда принята: смена города на '{city}'",
+                    "current_city": city,
+                }
+            return {"status": "error", "message": "Не указан город"}
+
+        elif cmd == "toggle_unit":
+            self.root.after(0, self._apply_remote_unit, ip_str)
+            target = "F" if self.temp_unit == "C" else "C"
+            return {
+                "status": "ok",
+                "message": f"Команда принята: шкала переключена на °{target}",
+                "unit": target,
+            }
+
+        elif cmd == "alert":
+            text = req.get("text", "")
+            self.root.after(0, self._apply_remote_alert, text, ip_str)
+            return {"status": "ok", "message": "Сообщение отображено на экране"}
+
+        elif cmd == "get_status":
+            return {
+                "status": "ok",
+                "city": self.lbl_city.cget("text"),
+                "temp": self.lbl_temp.cget("text"),
+                "condition": self.lbl_condition.cget("text"),
+                "unit": self.temp_unit,
+                "humidity": self.val_humidity.cget("text"),
+                "wind": self.val_wind.cget("text"),
+                "pressure": self.val_pressure.cget("text"),
+                "uv": self.val_uv.cget("text"),
+            }
+
+        elif cmd == "ping":
+            return {"status": "ok", "message": "pong", "server_ip": self.local_ip}
+
+        return {"status": "error", "message": f"Неизвестная команда '{cmd}'"}
+
+    def _apply_remote_city(self, city: str, ip: str):
+        self.search_var.set(city)
+        self.lbl_net_log.config(
+            text=f"📡 [Пульт {ip}]: Запрос на смену города на '{city}'",
+            fg="#a855f7",
+        )
+        self.load_weather_async(city)
+
+    def _apply_remote_unit(self, ip: str):
+        self.toggle_unit()
+        self.lbl_net_log.config(
+            text=f"📡 [Пульт {ip}]: Переключена единица измерения на °{self.temp_unit}",
+            fg="#a855f7",
+        )
+
+    def _apply_remote_alert(self, text: str, ip: str):
+        self.lbl_net_log.config(
+            text=f"📢 [Сообщение с пульта {ip}]: {text}",
+            fg="#facc15",
+        )
+
     def _build_ui(self):
+        net_banner = tk.Frame(self.root, bg=self.c_card, padx=12, pady=6)
+        net_banner.pack(fill="x", padx=24, pady=(12, 0))
+
+        self.lbl_net_info = tk.Label(
+            net_banner,
+            text=f"🌐 TCP Сервер: определение адреса...",
+            font=("Segoe UI", 10, "bold"),
+            bg=self.c_card,
+            fg="#38bdf8",
+        )
+        self.lbl_net_info.pack(side="left")
+
+        self.lbl_net_log = tk.Label(
+            net_banner,
+            text="Ожидание сетевых команд от пульта...",
+            font=("Segoe UI", 9),
+            bg=self.c_card,
+            fg=self.c_muted,
+        )
+        self.lbl_net_log.pack(side="right")
+
         search_bar = tk.Frame(self.root, bg=self.c_bg)
-        search_bar.pack(fill="x", padx=24, pady=(20, 10))
+        search_bar.pack(fill="x", padx=24, pady=(12, 10))
 
         self.search_var = tk.StringVar(value="Москва")
         self.search_entry = tk.Entry(
@@ -167,15 +282,6 @@ class DesktopWeatherApp:
 
         temp_row = tk.Frame(self.main_card, bg=self.c_surface)
         temp_row.pack(pady=4)
-
-        self.lbl_icon = tk.Label(
-            temp_row,
-            text="☀️",
-            font=("Segoe UI Emoji", 48),
-            bg=self.c_surface,
-            fg=self.c_text,
-        )
-        self.lbl_icon.pack(side="left", padx=16)
 
         self.lbl_temp = tk.Label(
             temp_row,
@@ -324,7 +430,6 @@ class DesktopWeatherApp:
         self.lbl_city.config(text=full_city)
         self.lbl_date.config(text=datetime.now().strftime("%d.%m.%Y • %A"))
         self.lbl_temp.config(text=self._format_temp(temp))
-        self.lbl_icon.config(text=icon)
         self.lbl_condition.config(text=desc)
         self.lbl_feels.config(text=f"Ощущается как: {self._format_temp(feels)}")
 
